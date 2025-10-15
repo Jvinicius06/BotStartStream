@@ -117,23 +117,40 @@ export async function refreshAccessToken(refreshToken, clientId, clientSecret) {
 }
 
 /**
+ * Verifica se o token está próximo de expirar (menos de 1 hora)
+ */
+export function isTokenExpiringSoon() {
+  const tokens = loadTokens();
+
+  if (!tokens || !tokens.expires_at) {
+    return true; // Se não tem informação de expiração, assume que deve renovar
+  }
+
+  const now = Date.now();
+  const timeUntilExpiry = tokens.expires_at - now;
+  const twoHoursInMs = 60 * 60 * 1000 * 2; // 2 horas
+
+  return timeUntilExpiry < twoHoursInMs;
+}
+
+/**
  * Obtém um access token válido, renovando se necessário
  */
 export async function getValidAccessToken(clientId, clientSecret) {
   let tokens = loadTokens();
-  
+
   if (!tokens) {
     throw new Error('Nenhum token encontrado. Execute: npm run auth');
   }
-  
+
   // Verifica se o token ainda é válido
   const isValid = await validateToken(tokens.access_token, clientId);
-  
+
   if (isValid) {
     console.log('✓ Token válido');
     return tokens.access_token;
   }
-  
+
   // Token expirado, renovar
   console.log('⟳ Token expirado, renovando...');
   tokens = await refreshAccessToken(tokens.refresh_token, clientId, clientSecret);

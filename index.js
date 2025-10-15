@@ -1,6 +1,6 @@
 import tmi from 'tmi.js';
 import dotenv from 'dotenv';
-import { getValidAccessToken } from './auth.js';
+import { getValidAccessToken, isTokenExpiringSoon, refreshAccessToken, loadTokens } from './auth.js';
 import { OBSController } from './obs.js';
 
 dotenv.config();
@@ -32,6 +32,72 @@ const obsController = new OBSController(OBS_HOST, OBS_PORT, OBS_PASSWORD);
 
 // Cliente TMI (será inicializado após obter token)
 let client = null;
+
+// Timer para verificação de token
+let tokenCheckInterval = null;
+
+/**
+ * Verifica e renova o token se necessário, reconectando o cliente
+ */
+async function checkAndRenewToken() {
+  try {
+    if (isTokenExpiringSoon()) {
+      console.log('\n⟳ Token próximo de expirar, renovando...');
+
+      // Renova o token
+      const currentTokens = loadTokens();
+      const tokens = await refreshAccessToken(
+        currentTokens.refresh_token,
+        TWITCH_CLIENT_ID,
+        TWITCH_CLIENT_SECRET
+      );
+
+      if (client) {
+        console.log('🔄 Reconectando ao chat com novo token...');
+
+        // Desconecta o cliente atual
+        await client.disconnect();
+
+        // Recria o cliente com o novo token
+        client = new tmi.Client({
+          options: { debug: false },
+          connection: {
+            reconnect: true,
+            secure: true
+          },
+          identity: {
+            username: TWITCH_CHANNEL,
+            password: `oauth:${tokens.access_token}`
+          },
+          channels: [TWITCH_CHANNEL]
+        });
+
+        // Re-adiciona os event handlers
+        client.on('connected', onConnectedHandler);
+        client.on('message', onMessageHandler);
+        client.on('disconnected', onDisconnectedHandler);
+        client.on('notice', onNoticeHandler);
+
+        // Reconecta
+        await client.connect();
+        console.log('✓ Reconectado com sucesso!\n');
+      }
+    }
+  } catch (error) {
+    console.error('❌ Erro ao renovar token:', error.message);
+  }
+}
+
+/**
+ * Inicia a verificação periódica do token (a cada 30 minutos)
+ */
+function startTokenChecker() {
+  // Verifica a cada 30 minutos
+  const checkIntervalMs = 30 * 60 * 1000;
+
+  tokenCheckInterval = setInterval(checkAndRenewToken, checkIntervalMs);
+  console.log('⏱  Verificação automática de token iniciada (a cada 30 minutos)\n');
+}
 
 /**
  * Inicializa o bot
@@ -82,10 +148,14 @@ async function initBot() {
     client.on('connected', onConnectedHandler);
     client.on('message', onMessageHandler);
     client.on('disconnected', onDisconnectedHandler);
+    client.on('notice', onNoticeHandler);
 
     // Conecta ao chat
     console.log('\n💬 Conectando ao chat da Twitch...');
     await client.connect();
+
+    // Inicia verificação periódica de token
+    startTokenChecker();
 
   } catch (error) {
     console.error('❌ Erro ao inicializar bot:', error.message);
@@ -108,6 +178,25 @@ function onConnectedHandler(addr, port) {
  */
 function onDisconnectedHandler(reason) {
   console.log(`❌ Desconectado do chat: ${reason}`);
+}
+
+/**
+ * Handler para notificações (incluindo erros de autenticação)
+ */
+async function onNoticeHandler(channel, msgid, message) {
+  // Verifica se é erro de autenticação
+  if (msgid === 'msg_channel_suspended' || msgid === 'msg_banned' || msgid === 'authentication_failed') {
+    console.log(`\n⚠ Erro de autenticação detectado: ${message}`);
+    console.log('🔄 Tentando renovar token e reconectar...');
+
+    try {
+      await checkAndRenewToken();
+    } catch (error) {
+      console.error('❌ Falha ao renovar token:', error.message);
+      console.error('⚠ Execute: npm run auth');
+      process.exit(1);
+    }
+  }
 }
 
 /**
@@ -213,26 +302,34 @@ async function handleStopCommand(channel, username) {
 // Handlers de encerramento gracioso
 process.on('SIGINT', async () => {
   console.log('\n\n🛑 Encerrando bot...');
-  
+
+  if (tokenCheckInterval) {
+    clearInterval(tokenCheckInterval);
+  }
+
   if (client) {
     await client.disconnect();
   }
-  
+
   await obsController.disconnect();
-  
+
   console.log('✓ Bot encerrado\n');
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.log('\n\n🛑 Encerrando bot...');
-  
+
+  if (tokenCheckInterval) {
+    clearInterval(tokenCheckInterval);
+  }
+
   if (client) {
     await client.disconnect();
   }
-  
+
   await obsController.disconnect();
-  
+
   console.log('✓ Bot encerrado\n');
   process.exit(0);
 });
